@@ -8,9 +8,10 @@
 ![Status](https://img.shields.io/badge/status-active-success)
 
 ---
-![Menu](images/menu.png)
-![Menu](images/menu.png)
-![Menu](images/menu.png)
+![SC](images/sc1.png)
+![SC](images/sc2.png)
+![SC](images/sc3.png)
+![SC](images/sc4.png)
 ---
 ## Progress
 
@@ -26,9 +27,9 @@
 ---
 ## Примеры геймплея
 # Pong
-![Pong](images/gameplay.gif)
+![Pong](images/gameplay_pong.gif)
 # Морской бой
-![Sea Battle](images/gameplay.gif)
+![Sea Battle](images/gameplay_sea.gif)
 ---
 Проект включает:
 
