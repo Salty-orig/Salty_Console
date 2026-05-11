@@ -1,0 +1,371 @@
+#include <Arduino.h>
+#include <SD.h>
+#include <VS1053.h>
+#include <TFT_eSPI.h>
+
+#define SPI_CLK_PIN 18
+#define SPI_MISO_PIN 19
+#define SPI_MOSI_PIN 23
+
+#define VS1053_CS 5
+#define VS1053_DCS 21
+#define VS1053_DREQ 22
+#define SDREADER_CS 26
+
+#define BUTTON_PIN1 0
+#define BUTTON_PIN2 2
+#define BUTTON_PIN3 32
+#define BUTTON_PIN4 4
+
+#define X_JOY 34
+#define Y_JOY 35
+
+#define X1_JOY 25
+#define Y1_JOY 33
+
+VS1053 player(VS1053_CS, VS1053_DCS, VS1053_DREQ);
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite sprite = TFT_eSprite(&tft);
+
+// Структуры для 3D куба
+struct Point3D { float x, y, z; };
+struct Edge { int p1, p2; };
+
+const Point3D cubeVertices[8] = {
+    {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+    {-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}
+};
+
+const Edge cubeEdges[12] = {
+    {0, 1}, {1, 2}, {2, 3}, {3, 0},
+    {4, 5}, {5, 6}, {6, 7}, {7, 4},
+    {0, 4}, {1, 5}, {2, 6}, {3, 7}
+};
+
+// Параметры графики
+static float angleX = 0, angleY = 0, angleZ = 0;
+static const float rotationSpeedX = 0.01, rotationSpeedY = 0.015, rotationSpeedZ = 0.005;
+static const int CUBE_SIZE = 30;
+static const int CENTER_X = 160;
+static const int CENTER_Y = 120;
+static const float distance = 4.0;
+
+// Аудио переменные
+static volatile bool audioPlaying = false;
+static volatile uint32_t audioFramesSent = 0;
+
+// Статистика графики
+static volatile uint32_t graphicsFrameCount = 0;
+static volatile float currentFPS = 0.0;
+
+// Максимально простая задача аудио
+void audioTask(void *pvParameters) {
+    Serial.println("Audio task started");
+    
+    // Просто открываем файл и воспроизводим
+    File mp3File = SD.open("/obsession.mp3");
+    if (!mp3File) {
+        Serial.println("ERROR: Cannot open MP3 file");
+        vTaskDelete(NULL);
+    }
+    
+    // Инициализация VS1053
+    player.begin();
+    player.switchToMp3Mode();
+    player.setVolume(75);
+    player.startSong();
+    
+    audioPlaying = true;
+    Serial.println("Audio playback started");
+    
+    // Простой буфер
+    uint8_t buffer[512];
+    
+    while (1) {
+        if (audioPlaying) {
+            // Если VS1053 готов принять данные
+            if (player.data_request()) {
+                // Читаем из файла
+                size_t bytesRead = mp3File.read(buffer, sizeof(buffer));
+                
+                if (bytesRead > 0) {
+                    // Отправляем в VS1053
+                    player.playChunk(buffer, bytesRead);
+                    audioFramesSent++;
+                    
+                    // Если конец файла - начинаем сначала
+                    if (bytesRead < sizeof(buffer)) {
+                        mp3File.seek(0);
+                    }
+                } else {
+                    // Файл закончился - начинаем сначала
+                    mp3File.seek(0);
+                }
+            }
+        }
+        
+        // Очень короткая задержка
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+    }
+}
+
+// Проекция точки
+void projectPoint(const Point3D* p, float* x2d, float* y2d) {
+    static float lastCosX, lastSinX, lastCosY, lastSinY, lastCosZ, lastSinZ;
+    static uint32_t lastUpdate = 0;
+    
+    if (millis() - lastUpdate > 20) {
+        lastCosX = cos(angleX); lastSinX = sin(angleX);
+        lastCosY = cos(angleY); lastSinY = sin(angleY);
+        lastCosZ = cos(angleZ); lastSinZ = sin(angleZ);
+        lastUpdate = millis();
+    }
+    
+    float y1 = p->y * lastCosX - p->z * lastSinX;
+    float z1 = p->y * lastSinX + p->z * lastCosX;
+    
+    float x2 = p->x * lastCosY + z1 * lastSinY;
+    float z2 = -p->x * lastSinY + z1 * lastCosY;
+    
+    float x3 = x2 * lastCosZ - y1 * lastSinZ;
+    float y3 = x2 * lastSinZ + y1 * lastCosZ;
+    
+    float scale = distance / (distance + z2);
+    *x2d = CENTER_X + x3 * CUBE_SIZE * scale;
+    *y2d = CENTER_Y + y3 * CUBE_SIZE * scale;
+}
+
+// Задача графики (не трогаем)
+void graphicsTask(void *pvParameters) {
+    Serial.println("Graphics task started");
+    
+    unsigned long lastFPSTime = millis();
+    unsigned long frameCounter = 0;
+    
+    const uint16_t colors[] = {
+        TFT_CYAN, TFT_YELLOW, TFT_GREEN, TFT_MAGENTA,
+        TFT_ORANGE, TFT_PINK, TFT_LIGHTGREY
+    };
+    
+    const uint16_t bgColor = TFT_BLACK;
+    const uint16_t textColor = TFT_GREEN;
+    
+    uint8_t colorIndex = 0;
+    uint32_t lastColorChange = 0;
+    
+    while (1) {
+        unsigned long frameStart = micros();
+        
+        // Обновляем углы
+        angleX += rotationSpeedX;
+        angleY += rotationSpeedY;
+        angleZ += rotationSpeedZ;
+        
+        if (angleX > TWO_PI) angleX -= TWO_PI;
+        if (angleY > TWO_PI) angleY -= TWO_PI;
+        if (angleZ > TWO_PI) angleZ -= TWO_PI;
+        
+        // Анимация цвета
+        if (millis() - lastColorChange > 2000) {
+            colorIndex = (colorIndex + 1) % (sizeof(colors) / sizeof(colors[0]));
+            lastColorChange = millis();
+        }
+        
+        // Очищаем спрайт
+        sprite.fillSprite(bgColor);
+        
+        // Проекция и отрисовка куба
+        float x2d[8], y2d[8];
+        for (int i = 0; i < 8; i++) {
+            projectPoint(&cubeVertices[i], &x2d[i], &y2d[i]);
+        }
+        
+        for (int i = 0; i < 12; i++) {
+            int p1 = cubeEdges[i].p1;
+            int p2 = cubeEdges[i].p2;
+            
+            sprite.drawLine(
+                (int)x2d[p1], (int)y2d[p1],
+                (int)x2d[p2], (int)y2d[p2],
+                colors[colorIndex]
+            );
+        }
+        
+        for (int i = 0; i < 8; i++) {
+            sprite.fillCircle((int)x2d[i], (int)y2d[i], 2, TFT_YELLOW);
+        }
+        
+        // Статистика FPS
+        frameCounter++;
+        unsigned long currentTime = millis();
+        
+        if (currentTime - lastFPSTime >= 500) {
+    // Точная формула: FPS = количество кадров / время в секундах
+    currentFPS = (float)frameCounter * 1000.0 / (currentTime - lastFPSTime);
+    
+    // Или более читаемо:
+    // float timeInSeconds = (currentTime - lastFPSTime) / 1000.0;
+    // currentFPS = frameCounter / timeInSeconds;
+    
+    graphicsFrameCount = frameCounter;
+    frameCounter = 0;
+    lastFPSTime = currentTime;
+}
+        
+        // Отображаем статистику
+        sprite.setTextColor(textColor, bgColor);
+        sprite.drawString("FPS: " + String(currentFPS, 1), 10, 10, 2);
+        sprite.drawString("Audio: " + String(audioFramesSent), 10, 35, 2);
+        
+        // Статус аудио
+        sprite.setTextColor(audioPlaying ? TFT_GREEN : TFT_RED, bgColor);
+        sprite.drawString(audioPlaying ? "AUDIO: ON" : "AUDIO: OFF", 10, 60, 2);
+        
+        // Информация о ядрах
+        sprite.setTextColor(TFT_CYAN, bgColor);
+        sprite.drawString("AUDIO: CORE 0", 200, 10, 1);
+        sprite.drawString("GRAPHICS: CORE 1", 200, 25, 1);
+        sprite.drawCircle(200, 100, 30, digitalRead(BUTTON_PIN1) ? TFT_GREEN : TFT_RED);
+        sprite.drawCircle(200, 150, 30, digitalRead(BUTTON_PIN2) ? TFT_GREEN : TFT_RED);
+        
+        int X = map(analogRead(X_JOY), 0, 4095, 0, 300);                    
+        int Y = map(analogRead(Y_JOY), 0, 4095, 0, 220);
+
+        int X1 = map(analogRead(X1_JOY), 0, 4095, 0, 300);                    
+        int Y1 = map(analogRead(Y1_JOY), 0, 4095, 0, 220);
+
+        sprite.drawSmoothCircle(X, Y, 20, digitalRead(BUTTON_PIN3) ? TFT_RED : TFT_GREEN, TFT_BLUE);
+
+        sprite.drawSmoothCircle(X1, Y1, 10, digitalRead(BUTTON_PIN4) ? TFT_RED : TFT_GREEN, TFT_BLUE);
+        // Выводим спрайт
+        sprite.pushSprite(0, 0);
+        
+        // Регулируем частоту кадров
+        unsigned long frameTime = micros() - frameStart;
+        unsigned long targetFrameTime = 16667;
+        
+        if (frameTime < targetFrameTime) {
+            TickType_t delayTicks = (targetFrameTime - frameTime) / 1000 / portTICK_PERIOD_MS;
+            if (delayTicks > 0) {
+                vTaskDelay(delayTicks);
+            }
+        }
+        
+        // Периодический yield
+        if (frameCounter % 10 == 0) {
+            taskYIELD();
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+    
+    Serial.println("\n\n=== ESP32-S3 Simple Audio + Graphics ===\n");
+    
+    // Настройка пинов
+    pinMode(VS1053_DREQ, INPUT);
+    pinMode(BUTTON_PIN1, INPUT_PULLUP);
+    pinMode(BUTTON_PIN2, INPUT_PULLUP);
+    pinMode(BUTTON_PIN3, INPUT_PULLUP);
+    pinMode(X_JOY, INPUT);
+    pinMode(Y_JOY, INPUT);
+    pinMode(BUTTON_PIN4, INPUT_PULLUP);
+    pinMode(X1_JOY, INPUT);
+    pinMode(Y1_JOY, INPUT);
+
+    // Инициализация дисплея
+    tft.init();
+    tft.setRotation(1);
+    tft.fillScreen(TFT_BLACK);
+    tft.invertDisplay(false);
+    
+    // Создаем спрайт
+    sprite.createSprite(320, 240);
+    sprite.setTextDatum(TL_DATUM);
+    
+    // Начальный экран
+    sprite.fillSprite(TFT_BLACK);
+    sprite.setTextColor(TFT_GREEN, TFT_BLACK);
+    sprite.drawString("ESP32 Simple", 40, 50, 2);
+    sprite.drawString("Initializing...", 40, 80, 2);
+    sprite.pushSprite(0, 0);
+    
+    // Инициализация SPI
+    SPI.begin(SPI_CLK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN);
+    
+    // Монтируем SD карту
+    Serial.println("Mounting SD card...");
+    sprite.drawString("Mounting SD...", 40, 110, 2);
+    sprite.pushSprite(0, 0);
+    
+    if (!SD.begin(SDREADER_CS)) {
+        Serial.println("ERROR: SD card mount failed!");
+        sprite.drawString("SD ERROR!", 40, 140, 2);
+        sprite.pushSprite(0, 0);
+        while(1);
+    }
+    Serial.println("SD card mounted");
+    
+    // Проверяем VS1053
+    Serial.println("Checking VS1053...");
+    sprite.drawString("Checking VS1053...", 40, 140, 2);
+    sprite.pushSprite(0, 0);
+    player.begin();
+
+    
+    if (!player.isChipConnected()) {
+        Serial.println("ERROR: VS1053 not connected!");
+        sprite.drawString("VS1053 NC!", 40, 200, 2);
+        sprite.pushSprite(0, 0);
+        while(1);
+    }
+    
+    Serial.println("VS1053 OK");
+    
+    // Очищаем экран
+    sprite.fillSprite(TFT_BLACK);
+    sprite.pushSprite(0, 0);
+    
+    Serial.println("Creating tasks...");
+    
+    // Отключаем watchdog
+    disableCore0WDT();
+    disableCore1WDT();
+    
+    // Создаем задачу аудио на ядре 0
+    xTaskCreatePinnedToCore(
+        audioTask,
+        "AudioTask",
+        4096,
+        NULL,
+        5,  // Высокий приоритет
+        NULL,
+        0
+    );
+    
+    // Создаем задачу графики на ядре 1
+    xTaskCreatePinnedToCore(
+        graphicsTask,
+        "GraphicsTask",
+        8192,
+        NULL,
+        1,  // Низкий приоритет
+        NULL,
+        1
+    );
+    
+    Serial.println("\n=== System Ready ===");
+    Serial.println("Audio: Core 0, Prio 5");
+    Serial.println("Graphics: Core 1, Prio 1");
+    Serial.println("========================\n");
+    
+    // Удаляем задачу setup
+    vTaskDelete(NULL);
+}
+
+void loop() {
+    // Не используется
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+}

@@ -1,0 +1,217 @@
+#include <Arduino.h>
+
+// Определение пинов для первого джойстика
+#define JOY1_X_PIN 34   // GPIO34 (ADC1_CH6)
+#define JOY1_Y_PIN 35   // GPIO35 (ADC1_CH7)
+#define JOY1_BTN_PIN 32 // GPIO32 для кнопки
+
+// Определение пинов для второго джойстика
+#define JOY2_X_PIN 36   // GPIO36 (ADC1_CH0)
+#define JOY2_Y_PIN 39   // GPIO39 (ADC1_CH3)
+#define JOY2_BTN_PIN 33 // GPIO33 для кнопки
+
+// Переменные для хранения значений
+int joy1X = 0, joy1Y = 0;
+int joy2X = 0, joy2Y = 0;
+bool joy1Btn = false, joy2Btn = false;
+bool joy1BtnPrev = false, joy2BtnPrev = false;
+
+// Пороговые значения для определения центра
+#define DEADZONE 50
+
+// Калибровочные значения (заполняются при калибровке)
+int joy1XMin = 0, joy1XMax = 4095, joy1XCenter = 2048;
+int joy1YMin = 0, joy1YMax = 4095, joy1YCenter = 2048;
+int joy2XMin = 0, joy2XMax = 4095, joy2XCenter = 2048;
+int joy2YMin = 0, joy2YMax = 4095, joy2YCenter = 2048;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n=== ESP32 Dual Joystick Test ===\n");
+  
+  // Настройка пинов
+  pinMode(JOY1_X_PIN, INPUT);
+  pinMode(JOY1_Y_PIN, INPUT);
+  pinMode(JOY1_BTN_PIN, INPUT_PULLUP);
+  
+  pinMode(JOY2_X_PIN, INPUT);
+  pinMode(JOY2_Y_PIN, INPUT);
+  pinMode(JOY2_BTN_PIN, INPUT_PULLUP);
+  
+  // Калибровка (опционально)
+  calibrateJoysticks();
+  
+  Serial.println("Joystick pins configured:");
+  Serial.printf("Joystick 1: X=%d, Y=%d, Button=%d\n", JOY1_X_PIN, JOY1_Y_PIN, JOY1_BTN_PIN);
+  Serial.printf("Joystick 2: X=%d, Y=%d, Button=%d\n", JOY2_X_PIN, JOY2_Y_PIN, JOY2_BTN_PIN);
+  Serial.println("\nReading values...");
+  Serial.println("Format: Joy1(X,Y,Button) | Joy2(X,Y,Button)");
+  Serial.println("===========================================");
+}
+
+void calibrateJoysticks() {
+  Serial.println("Calibrating joysticks...");
+  Serial.println("Move both joysticks to their extremes and center.");
+  Serial.println("Starting in 3 seconds...");
+  delay(3000);
+  
+  // Читаем начальные значения как калибровочные
+  joy1XCenter = analogRead(JOY1_X_PIN);
+  joy1YCenter = analogRead(JOY1_Y_PIN);
+  joy2XCenter = analogRead(JOY2_X_PIN);
+  joy2YCenter = analogRead(JOY2_Y_PIN);
+  
+  Serial.println("Calibration complete!");
+  Serial.printf("Joy1 Center: X=%d, Y=%d\n", joy1XCenter, joy1YCenter);
+  Serial.printf("Joy2 Center: X=%d, Y=%d\n", joy2XCenter, joy2YCenter);
+  delay(1000);
+}
+
+// Функция для нормализации значений с учетом мертвой зоны
+int normalizeValue(int raw, int center, int minVal, int maxVal) {
+  // Применяем мертвую зону
+  if (abs(raw - center) < DEADZONE) {
+    return 0;
+  }
+  
+  // Нормализуем от -100 до 100
+  if (raw > center) {
+    return map(raw, center, maxVal, 0, 100);
+  } else {
+    return map(raw, minVal, center, -100, 0);
+  }
+}
+
+void loop() {
+  // Чтение сырых значений
+  joy1X = analogRead(JOY1_X_PIN);
+  joy1Y = analogRead(JOY1_Y_PIN);
+  joy2X = analogRead(JOY2_X_PIN);
+  joy2Y = analogRead(JOY2_Y_PIN);
+  
+  // Чтение кнопок (активный низкий уровень при использовании INPUT_PULLUP)
+  joy1Btn = !digitalRead(JOY1_BTN_PIN);
+  joy2Btn = !digitalRead(JOY2_BTN_PIN);
+  
+  // Нормализованные значения
+  int joy1XNorm = normalizeValue(joy1X, joy1XCenter, joy1XMin, joy1XMax);
+  int joy1YNorm = normalizeValue(joy1Y, joy1YCenter, joy1YMin, joy1YMax);
+  int joy2XNorm = normalizeValue(joy2X, joy2XCenter, joy2XMin, joy2XMax);
+  int joy2YNorm = normalizeValue(joy2Y, joy2YCenter, joy2YMin, joy2YMax);
+  
+  // Определение направления
+  String joy1Dir = getDirection(joy1XNorm, joy1YNorm);
+  String joy2Dir = getDirection(joy2XNorm, joy2YNorm);
+  
+  // Вывод в Serial Monitor
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 100) { // Выводим каждые 100 мс
+    Serial.printf("Joy1: X=%4d(%3d%%) Y=%4d(%3d%%) Btn=%d Dir=%8s | ",
+                  joy1X, joy1XNorm, joy1Y, joy1YNorm, joy1Btn, joy1Dir.c_str());
+    Serial.printf("Joy2: X=%4d(%3d%%) Y=%4d(%3d%%) Btn=%d Dir=%8s\n",
+                  joy2X, joy2XNorm, joy2Y, joy2YNorm, joy2Btn, joy2Dir.c_str());
+    lastPrint = millis();
+  }
+  
+  // Обнаружение нажатия кнопки (по фронту)
+  if (joy1Btn && !joy1BtnPrev) {
+    Serial.println(">>> JOYSTICK 1 BUTTON PRESSED!");
+  }
+  if (joy2Btn && !joy2BtnPrev) {
+    Serial.println(">>> JOYSTICK 2 BUTTON PRESSED!");
+  }
+  
+  // Сохраняем предыдущие состояния кнопок
+  joy1BtnPrev = joy1Btn;
+  joy2BtnPrev = joy2Btn;
+  
+  // Простые визуальные индикаторы в Serial
+  static unsigned long lastVisual = 0;
+  if (millis() - lastVisual > 500) { // Каждые 500 мс
+    printVisualIndicator(joy1XNorm, joy1YNorm, joy2XNorm, joy2YNorm);
+    lastVisual = millis();
+  }
+  
+  delay(10); // Небольшая задержка для стабильности
+}
+
+// Функция определения направления
+String getDirection(int x, int y) {
+  if (abs(x) < 20 && abs(y) < 20) return "CENTER";
+  if (abs(x) > abs(y)) {
+    if (x > 0) return "RIGHT";
+    else return "LEFT";
+  } else {
+    if (y > 0) return "DOWN";
+    else return "UP";
+  }
+}
+
+// Визуальная индикация в Serial
+void printVisualIndicator(int j1x, int j1y, int j2x, int j2y) {
+  Serial.println("\n--- Visual Indicator ---");
+  
+  // Джойстик 1
+  Serial.print("Joy1: [");
+  Serial.print(j1x < -50 ? "←" : j1x > 50 ? "→" : "·");
+  Serial.print("|");
+  Serial.print(j1y < -50 ? "↑" : j1y > 50 ? "↓" : "·");
+  Serial.print("] ");
+  
+  // Джойстик 2
+  Serial.print("Joy2: [");
+  Serial.print(j2x < -50 ? "←" : j2x > 50 ? "→" : "·");
+  Serial.print("|");
+  Serial.print(j2y < -50 ? "↑" : j2y > 50 ? "↓" : "·");
+  Serial.println("]");
+  
+  // Прогресс-бары
+  Serial.print("Joy1 X: ");
+  printProgressBar(j1x);
+  Serial.print("Joy1 Y: ");
+  printProgressBar(j1y);
+  Serial.print("Joy2 X: ");
+  printProgressBar(j2x);
+  Serial.print("Joy2 Y: ");
+  printProgressBar(j2y);
+  Serial.println();
+}
+
+void printProgressBar(int value) {
+  int bars = map(abs(value), 0, 100, 0, 20);
+  Serial.print("[");
+  if (value < 0) {
+    for (int i = 0; i < 20 - bars; i++) Serial.print(" ");
+    for (int i = 0; i < bars; i++) Serial.print("<");
+    Serial.print("|");
+  } else {
+    Serial.print("|");
+    for (int i = 0; i < bars; i++) Serial.print(">");
+    for (int i = 0; i < 20 - bars; i++) Serial.print(" ");
+  }
+  Serial.printf("] %3d%%\n", value);
+}
+
+// Дополнительные функции для удобства
+void printRawValues() {
+  Serial.println("\n=== RAW VALUES ===");
+  Serial.printf("Joy1: X=%4d, Y=%4d, Btn=%d\n", joy1X, joy1Y, joy1Btn);
+  Serial.printf("Joy2: X=%4d, Y=%4d, Btn=%d\n", joy2X, joy2Y, joy2Btn);
+}
+
+void testAllPins() {
+  Serial.println("\n=== PIN TEST ===");
+  Serial.println("Testing all joystick pins (move joysticks to see changes):");
+  
+  for (int i = 0; i < 10; i++) {
+    Serial.printf("Test %d: ", i+1);
+    Serial.printf("J1X=%4d, J1Y=%4d, J2X=%4d, J2Y=%4d\n",
+                  analogRead(JOY1_X_PIN),
+                  analogRead(JOY1_Y_PIN),
+                  analogRead(JOY2_X_PIN),
+                  analogRead(JOY2_Y_PIN));
+    delay(200);
+  }
+}
