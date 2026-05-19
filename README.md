@@ -5,7 +5,6 @@
 ![Platform](https://img.shields.io/badge/platform-ESP32-blue)
 ![Language](https://img.shields.io/badge/language-C%2B%2B-orange)
 ![Framework](https://img.shields.io/badge/framework-Arduino-green)
-![Status](https://img.shields.io/badge/status-active-success)
 
 ---
 ![SC](images/sc1.png)
